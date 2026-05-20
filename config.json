@@ -1,0 +1,17 @@
+{
+  "mqtt": {
+    "broker": "192.168.1.250",
+    "port": 1883,
+    "username": "atin",
+    "password": "team1@123#",
+    "company_id": 10
+  },
+  "ai": {
+    "model_path": "models/yolov8n.pt",
+    "confidence": 0.4,
+    "ai_module": "FACE"
+  },
+  "active_cameras": [
+    "Demo01"
+  ]
+}
