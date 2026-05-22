@@ -1,11 +1,11 @@
 import cv2
 import numpy as np
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Any
 
 def parse_point(p: Any) -> Tuple[float, float]:
     """
-    Parses a point representation into a float tuple (x, y).
-    Supports dict like {'x': x, 'y': y} and iterable like [x, y].
+    Chuyển đổi điểm biểu diễn thành một tuple số thực (x, y).
+    Hỗ trợ dạng dict như {'x': x, 'y': y} hoặc dạng danh sách như [x, y].
     """
     if isinstance(p, dict):
         x = p.get("x", p.get("X"))
@@ -18,8 +18,8 @@ def parse_point(p: Any) -> Tuple[float, float]:
 
 def build_roi_polygon(width: int, height: int, polygon: List[Any]) -> np.ndarray:
     """
-    Converts a normalized ROI polygon (list of relative [x, y] coordinates in [0.0, 1.0])
-    into an absolute pixel coordinate array for OpenCV functions.
+    Chuyển đổi đa giác ROI chuẩn hóa (danh sách các tọa độ tương đối [x, y] trong khoảng [0.0, 1.0])
+    thành mảng tọa độ pixel tuyệt đối để sử dụng với các hàm OpenCV.
     """
     pts = []
     for p in polygon:
@@ -34,7 +34,7 @@ def build_roi_polygon(width: int, height: int, polygon: List[Any]) -> np.ndarray
 
 def inside_roi(cx: int, cy: int, roi_pts: np.ndarray) -> bool:
     """
-    Checks if a central point (cx, cy) is within the given ROI polygon coordinates.
+    Kiểm tra xem điểm trung tâm (cx, cy) có nằm trong đa giác ROI được chỉ định hay không.
     """
     if roi_pts is None or len(roi_pts) == 0:
         return False

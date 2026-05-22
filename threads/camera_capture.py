@@ -6,134 +6,127 @@ import numpy as np
 
 class CameraCaptureThread(threading.Thread):
     """
-    Background thread to read frames from RTSP stream or generate mock frames.
-    Buffers the latest frame into a thread-safe Queue(maxsize=1).
+    Luồng chạy ngầm để đọc khung hình từ luồng RTSP.
+    Lưu trữ khung hình mới nhất vào hàng đợi Queue(maxsize=1) an toàn đa luồng.
     """
-    def __init__(self, camera_code: str, rtsp_url: str, is_mock: bool = False):
+    def __init__(self, camera_code: str, rtsp_url: str):
         super().__init__(name=f"CaptureThread_{camera_code}", daemon=True)
         self.camera_code = camera_code
         self.rtsp_url = rtsp_url
-        self.is_mock = is_mock
         self.running = True
-        self.frame_queue = queue.Queue(maxsize=1)
+        self.frame_queue = queue.Queue(maxsize=2)
         
-        # Connection retry parameters
+        # Các tham số thử lại kết nối khi mất kết nối
         self.reconnect_delay = 1.0
         self.max_reconnect_delay = 30.0
 
     def run(self):
         print(f"[{self.camera_code}] Capture thread started.")
-        if self.is_mock:
-            self._run_mock()
-        else:
-            self._run_rtsp()
+        self._run_rtsp()
 
     def _push_frame(self, frame):
         """
-        Pushes a new frame to the queue. If full, discards the old frame
-        to keep the queue size at 1 and containing only the most recent frame.
+        Đẩy khung hình mới vào hàng đợi maxsize=2.
+        Nếu đầy, loại bỏ khung hình cũ nhất để luôn giữ frame mới nhất (empty-put).
         """
-        try:
-            if self.frame_queue.full():
+        if self.frame_queue.full():
+            try:
                 self.frame_queue.get_nowait()
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                pass
         try:
             self.frame_queue.put_nowait(frame)
         except queue.Full:
             pass
 
-    def _run_mock(self):
-        # Generate synthetic frame with moving shapes at ~15 FPS
-        while self.running:
-            start_time = time.time()
-            
-            # Create a base gray-blue frame
-            frame = np.zeros((360, 640, 3), dtype=np.uint8) + 40
-            frame[:, :, 0] += 15 # slightly blue hue
-            
-            # Draw standard reference grid lines
-            for x in range(0, 640, 80):
-                cv2.line(frame, (x, 0), (x, 360), (60, 60, 60), 1)
-            for y in range(0, 360, 60):
-                cv2.line(frame, (0, y), (640, y), (60, 60, 60), 1)
-                
-            # Draw camera name and timestamp
-            cv2.putText(
-                frame,
-                f"CAMERA FEED: {self.camera_code.upper()} (MOCK)",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA
-            )
-            cv2.putText(
-                frame,
-                time.strftime("%Y-%m-%d %H:%M:%S"),
-                (20, 70),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1,
-                cv2.LINE_AA
-            )
-            
-            # Draw a moving shape (circle + rectangle representing a person)
-            t = time.time()
-            cx = int(320 + 200 * np.cos(t * 0.8))
-            cy = int(180 + 100 * np.sin(t * 1.1))
-            
-            # Draw head
-            cv2.circle(frame, (cx, cy - 25), 12, (220, 220, 220), -1)
-            # Draw body
-            cv2.rectangle(frame, (cx - 15, cy - 10), (cx + 15, cy + 30), (220, 220, 220), -1)
-            
-            cv2.putText(
-                frame,
-                "Simulated Target",
-                (cx - 50, cy - 45),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (200, 200, 200),
-                1,
-                cv2.LINE_AA
-            )
-
-            self._push_frame(frame)
-                
-            # Control frame rate
-            elapsed = time.time() - start_time
-            sleep_time = max(0.005, (1.0 / 15.0) - elapsed)
-            time.sleep(sleep_time)
-
     def _run_rtsp(self):
+        import imageio_ffmpeg
+        import subprocess
+
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
         while self.running:
-            print(f"[{self.camera_code}] Connecting to RTSP: {self.rtsp_url}")
-            cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            print(f"[{self.camera_code}] Đang kết nối tới RTSP (Probe): {self.rtsp_url}")
             
-            # Set buffer size to 1 to read only latest frame
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
-            if not cap.isOpened():
-                print(f"[{self.camera_code}] Failed to open RTSP. Retrying in {self.reconnect_delay:.1f}s...")
+            # Sử dụng OpenCV để dò thông số chiều rộng và chiều cao của khung hình
+            probe_cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            ret, first_frame = probe_cap.read()
+            if not ret or first_frame is None:
+                print(f"[{self.camera_code}] Không thể dò độ phân giải RTSP. Thử lại sau {self.reconnect_delay:.1f} giây...")
+                probe_cap.release()
                 time.sleep(self.reconnect_delay)
                 self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
                 continue
-            
-            print(f"[{self.camera_code}] RTSP connection successful.")
-            self.reconnect_delay = 1.0 # Reset delay on success
-            
-            while self.running:
-                ret, frame = cap.read()
-                if not ret:
-                    print(f"[{self.camera_code}] RTSP stream read error.")
-                    break
                 
-                self._push_frame(frame)
+            height, width = first_frame.shape[:2]
+            probe_cap.release()
+            print(f"[{self.camera_code}] Đã dò được độ phân giải gốc: {width}x{height}. Đặt độ phân giải đầu ra từ GPU là 640x320.")
+            self.reconnect_delay = 1.0  # Đặt lại độ trễ kết nối khi thành công
+            
+            # Khung hình từ FFmpeg sẽ luôn là 640x320 do lệnh resize
+            width, height = 640, 320
+            
+            # Cấu hình các lệnh chạy FFmpeg
+            command_cuda = [
+                ffmpeg_path,
+                "-rtsp_transport", "tcp",         # Ép buộc dùng TCP
+                "-fflags", "nobuffer",            # Tắt bộ đệm đầu vào
+                "-flags", "low_delay",            # Chế độ trễ thấp
+                "-probesize", "32",               # Giảm kích thước dữ liệu phân tích luồng xuống tối thiểu
+                "-analyzeduration", "0",          # Tắt thời gian phân tích định dạng
+                "-threads", "1",                  # Ép giải mã tuần tự để triệt tiêu bộ đệm đa luồng
+                "-hwaccel", "cuda",               # Sử dụng tăng tốc phần cứng GPU CUDA
+                "-hwaccel_output_format", "cuda", # Giữ giải mã trên GPU
+                "-i", self.rtsp_url,              # Luồng RTSP đầu vào
+                "-vf", "scale_cuda=640:320,hwdownload,format=nv12,format=bgr24", # Resize trên GPU
+                "-f", "image2pipe",               # Định dạng đầu ra
+                "-vcodec", "rawvideo",            # Giải mã video thô
+                "-pix_fmt", "bgr24",              # Định dạng pixel BGR cho OpenCV/YOLO
+                "-"                               # Xuất ra stdout
+            ]
+            
+            # Khởi chạy giải mã GPU CUDA
+            process = subprocess.Popen(command_cuda, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            time.sleep(0.5)
+            if process.poll() is not None:
+                print(f"[{self.camera_code}] LỖI: GPU CUDA không hỗ trợ giải mã hoặc kết nối thất bại. Thử lại sau...")
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                time.sleep(2.0)
+                continue
+            
+            print(f"[{self.camera_code}] Kết nối thành công và sử dụng tăng tốc phần cứng GPU CUDA.")
+            frame_size = width * height * 3
+            try:
+                while self.running:
+                    raw_frame = process.stdout.read(frame_size)
+                    if len(raw_frame) != frame_size:
+                        print(f"[{self.camera_code}] Lỗi đọc luồng video từ FFmpeg (RTSP disconnect).")
+                        break
                     
-            cap.release()
+                    frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
+                    
+                    # Đóng gói dữ liệu và tính capture_time
+                    from core.metrics import GLOBAL_METRICS
+                    GLOBAL_METRICS.increment_capture(self.camera_code)
+                    
+                    frame_data = {
+                        "frame": frame,
+                        "capture_time": time.time()
+                    }
+                    self._push_frame(frame_data)
+            except Exception as e:
+                print(f"[{self.camera_code}] Gặp lỗi khi đọc luồng video: {e}")
+            finally:
+                # Giải phóng tiến trình FFmpeg
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
             if self.running:
                 time.sleep(2.0)
 

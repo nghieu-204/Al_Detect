@@ -7,11 +7,13 @@
     "company_id": 10
   },
   "ai": {
-    "model_path": "models/yolov8n.pt",
-    "confidence": 0.4,
+    "model_path": "models/yolov8s.engine",
+    "confidence": 0.2,
     "ai_module": "FACE"
   },
   "active_cameras": [
+    "1",
+    "2",
     "Demo01"
   ]
 }
