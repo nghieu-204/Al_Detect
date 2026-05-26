@@ -7,6 +7,7 @@ import numpy as np
 class CameraCaptureThread(threading.Thread):
     """
     Luồng chạy ngầm để đọc khung hình từ luồng RTSP.
+    Sử dụng OpenCV (cv2.VideoCapture) để decode frame bằng CPU.
     Lưu trữ khung hình mới nhất vào hàng đợi Queue(maxsize=1) an toàn đa luồng.
     """
     def __init__(self, camera_code: str, rtsp_url: str):
@@ -14,9 +15,9 @@ class CameraCaptureThread(threading.Thread):
         self.camera_code = camera_code
         self.rtsp_url = rtsp_url
         self.running = True
-        self.frame_queue = queue.Queue(maxsize=2)
+        self.frame_queue = queue.Queue(maxsize=1)
         
-        # Các tham số thử lại kết nối khi mất kết nối
+        # Các tham số thử lại kết nối khi mất kết nối (Exponential Backoff)
         self.reconnect_delay = 1.0
         self.max_reconnect_delay = 30.0
 
@@ -26,8 +27,8 @@ class CameraCaptureThread(threading.Thread):
 
     def _push_frame(self, frame):
         """
-        Đẩy khung hình mới vào hàng đợi maxsize=2.
-        Nếu đầy, loại bỏ khung hình cũ nhất để luôn giữ frame mới nhất (empty-put).
+        Đẩy khung hình mới vào hàng đợi maxsize=1 (thuật toán Empty-Put).
+        Nếu đầy, loại bỏ khung hình cũ nhất để luôn giữ frame mới nhất.
         """
         if self.frame_queue.full():
             try:
@@ -40,93 +41,49 @@ class CameraCaptureThread(threading.Thread):
             pass
 
     def _run_rtsp(self):
-        import imageio_ffmpeg
-        import subprocess
-
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        import os
+        # Ép buộc OpenCV dùng TCP thay vì UDP để tránh mất gói tin
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
         while self.running:
-            print(f"[{self.camera_code}] Đang kết nối tới RTSP (Probe): {self.rtsp_url}")
-            
-            # Sử dụng OpenCV để dò thông số chiều rộng và chiều cao của khung hình
-            probe_cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-            ret, first_frame = probe_cap.read()
-            if not ret or first_frame is None:
-                print(f"[{self.camera_code}] Không thể dò độ phân giải RTSP. Thử lại sau {self.reconnect_delay:.1f} giây...")
-                probe_cap.release()
+            print(f"[{self.camera_code}] Đang kết nối tới RTSP: {self.rtsp_url}")
+
+            cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Giảm buffer để giảm latency
+
+            if not cap.isOpened():
+                print(f"[{self.camera_code}] Không thể kết nối RTSP. Thử lại sau {self.reconnect_delay:.1f}s...")
                 time.sleep(self.reconnect_delay)
                 self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
                 continue
-                
-            height, width = first_frame.shape[:2]
-            probe_cap.release()
-            print(f"[{self.camera_code}] Đã dò được độ phân giải gốc: {width}x{height}. Đặt độ phân giải đầu ra từ GPU là 640x320.")
-            self.reconnect_delay = 1.0  # Đặt lại độ trễ kết nối khi thành công
-            
-            # Khung hình từ FFmpeg sẽ luôn là 640x320 do lệnh resize
-            width, height = 640, 320
-            
-            # Cấu hình các lệnh chạy FFmpeg
-            command_cuda = [
-                ffmpeg_path,
-                "-hwaccel", "cuda",
-                "-rtsp_transport", "tcp",
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-analyzeduration", "0",
-                "-probesize", "32",
-                "-max_delay", "0",
-                "-i", self.rtsp_url,
-                "-vf", "scale=640:320,format=bgr24",
-                "-vsync", "drop",
-                "-f", "image2pipe",
-                "-vcodec", "rawvideo",
-                "-pix_fmt", "bgr24",
-                "-"
-            ]
-            
-            # Khởi chạy tiến trình FFmpeg
-            process = subprocess.Popen(command_cuda, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            time.sleep(0.5)
-            if process.poll() is not None:
-                print(f"[{self.camera_code}] LỖI: GPU CUDA không hỗ trợ giải mã hoặc kết nối thất bại. Thử lại sau...")
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
-                time.sleep(2.0)
-                continue
-            
-            print(f"[{self.camera_code}] Kết nối thành công và sử dụng tăng tốc phần cứng GPU CUDA.")
-            frame_size = width * height * 3
+
+            print(f"[{self.camera_code}] Kết nối thành công (OpenCV CPU Decode).")
+            self.reconnect_delay = 1.0  # Đặt lại khi kết nối thành công
+
             try:
                 while self.running:
-                    raw_frame = process.stdout.read(frame_size)
-                    if len(raw_frame) != frame_size:
-                        print(f"[{self.camera_code}] Lỗi đọc luồng video từ FFmpeg (RTSP disconnect).")
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        print(f"[{self.camera_code}] Mất kết nối RTSP.")
                         break
-                    
-                    frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
-                    
-                    # Đóng gói dữ liệu và tính capture_time
+
+                    # Resize về 640x320
+                    frame = cv2.resize(frame, (640, 320))
+
                     from core.metrics import GLOBAL_METRICS
                     GLOBAL_METRICS.increment_capture(self.camera_code)
-                    
+
                     frame_data = {
                         "frame": frame,
                         "capture_time": time.time()
                     }
                     self._push_frame(frame_data)
+
             except Exception as e:
                 print(f"[{self.camera_code}] Gặp lỗi khi đọc luồng video: {e}")
             finally:
-                # Giải phóng tiến trình FFmpeg
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=1.0)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                cap.release()
+
             if self.running:
                 time.sleep(2.0)
 

@@ -14,7 +14,8 @@ class BatchInferenceThread(threading.Thread):
         capture_threads: dict,
         camera_zones: dict,
         tracking_queues: dict,
-        yolo_model,
+        yolo_model_path: str,
+        class_names_ref: dict,
         device: str,
         confidence: float,
         data_lock: threading.Lock
@@ -23,13 +24,22 @@ class BatchInferenceThread(threading.Thread):
         self.capture_threads = capture_threads
         self.camera_zones = camera_zones
         self.tracking_queues = tracking_queues
-        self.yolo_model = yolo_model
+        self.yolo_model_path = yolo_model_path
+        self.class_names_ref = class_names_ref
+        self.yolo_model = None
         self.device = device
         self.confidence = confidence
         self.data_lock = data_lock
         self.running = True
 
     def run(self):
+        from ultralytics import YOLO
+        print(f"[BatchInference] Loading YOLO model: {self.yolo_model_path} on device: {self.device}")
+        self.yolo_model = YOLO(self.yolo_model_path)
+        
+        # Cập nhật danh sách class names cho hệ thống
+        self.class_names_ref.update(self.yolo_model.names)
+        
         print("[BatchInference] Centralized Batch Inference thread started.")
         while self.running:
             loop_start = time.time()
@@ -124,10 +134,8 @@ class BatchInferenceThread(threading.Thread):
                     except queue.Full:
                         pass
             
-            # Kiểm soát tốc độ suy diễn FPS (mục tiêu tốc độ toàn vòng lặp ~30 FPS)
-            elapsed = time.time() - loop_start
-            sleep_time = max(0.005, (1.0 / 30.0) - elapsed)
-            time.sleep(sleep_time)
+            # Không kìm hãm FPS nữa, để GPU chạy tối đa công suất
+            # time.sleep(0.001) # Có thể mở lại nếu muốn nhường 1ms cho CPU
             
         print("[BatchInference] Centralized Batch Inference thread stopped.")
 

@@ -38,9 +38,7 @@ class SystemManager:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"AI Device detected: {self.device.upper()}")
         
-        print(f"Loading YOLO model: {self.config['ai']['model_path']} on device: {self.device}")
-        self.yolo_model = YOLO(self.config["ai"]["model_path"])
-        self.class_names_ref.update(self.yolo_model.names)
+        self.yolo_model_path = self.config["ai"]["model_path"]
         
         self.batch_inference_thread = None
         
@@ -209,7 +207,8 @@ class SystemManager:
             capture_threads=self.capture_threads,
             camera_zones=self.camera_zones,
             tracking_queues=self.tracking_queues,
-            yolo_model=self.yolo_model,
+            yolo_model_path=self.yolo_model_path,
+            class_names_ref=self.class_names_ref,
             device=self.device,
             confidence=self.config["ai"]["confidence"],
             data_lock=self.data_lock

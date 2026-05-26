@@ -8,11 +8,8 @@
   },
   "ai": {
     "model_path": "models/yolov8s.engine",
-    "confidence": 0.4,
+    "confidence": 0.2,
     "ai_module": "FACE"
   },
-  "active_cameras": [
-    "1",
-    "Demo01"
-  ]
+  "active_cameras": ["1", "Demo01"]
 }
