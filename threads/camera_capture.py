@@ -69,23 +69,23 @@ class CameraCaptureThread(threading.Thread):
             # Cấu hình các lệnh chạy FFmpeg
             command_cuda = [
                 ffmpeg_path,
-                "-rtsp_transport", "tcp",         # Ép buộc dùng TCP
-                "-fflags", "nobuffer",            # Tắt bộ đệm đầu vào
-                "-flags", "low_delay",            # Chế độ trễ thấp
-                "-probesize", "32",               # Giảm kích thước dữ liệu phân tích luồng xuống tối thiểu
-                "-analyzeduration", "0",          # Tắt thời gian phân tích định dạng
-                "-threads", "1",                  # Ép giải mã tuần tự để triệt tiêu bộ đệm đa luồng
-                "-hwaccel", "cuda",               # Sử dụng tăng tốc phần cứng GPU CUDA
-                "-hwaccel_output_format", "cuda", # Giữ giải mã trên GPU
-                "-i", self.rtsp_url,              # Luồng RTSP đầu vào
-                "-vf", "scale_cuda=640:320,hwdownload,format=nv12,format=bgr24", # Resize trên GPU
-                "-f", "image2pipe",               # Định dạng đầu ra
-                "-vcodec", "rawvideo",            # Giải mã video thô
-                "-pix_fmt", "bgr24",              # Định dạng pixel BGR cho OpenCV/YOLO
-                "-"                               # Xuất ra stdout
+                "-hwaccel", "cuda",
+                "-rtsp_transport", "tcp",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-analyzeduration", "0",
+                "-probesize", "32",
+                "-max_delay", "0",
+                "-i", self.rtsp_url,
+                "-vf", "scale=640:320,format=bgr24",
+                "-vsync", "drop",
+                "-f", "image2pipe",
+                "-vcodec", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-"
             ]
             
-            # Khởi chạy giải mã GPU CUDA
+            # Khởi chạy tiến trình FFmpeg
             process = subprocess.Popen(command_cuda, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             time.sleep(0.5)
             if process.poll() is not None:
