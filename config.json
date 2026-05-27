@@ -11,5 +11,9 @@
     "confidence": 0.2,
     "ai_module": "FACE"
   },
-  "active_cameras": ["1", "Demo01"]
+  "active_cameras": [
+    "1",
+    "2",
+    "Demo01"
+  ]
 }

@@ -35,12 +35,12 @@ class TrackingThread(threading.Thread):
 
         print(f"[TrackingThread_{self.camera_code}] Started.")
         
-        # Cấu hình các thông số của ByteTrack
+        # Cấu hình các thông số của ByteTrack để khóa mục tiêu nhạy hơn
         args = SimpleNamespace(
             track_buffer=30,           # Số lượng frame giữ vết khi mất dấu
-            track_high_thresh=0.4,     # Ngưỡng tin cậy cho liên kết giai đoạn 1
+            track_high_thresh=0.25,    # Giảm xuống 0.25 để nhận diện các xe ở xa/bị che khuất sớm hơn
             track_low_thresh=0.1,      # Ngưỡng tin cậy cho liên kết giai đoạn 2
-            new_track_thresh=0.5,      # Ngưỡng tin cậy tối thiểu khởi tạo vết mới
+            new_track_thresh=0.3,      # Cho phép tạo vết mới ngay khi tự tin đạt >= 0.3
             match_thresh=0.8,          # Ngưỡng khoảng cách tối đa để khớp
             fuse_score=True            # Kết hợp điểm tin cậy
         )
@@ -64,8 +64,8 @@ class TrackingThread(threading.Thread):
             h, w = frame.shape[:2]
 
             # Nếu có kết quả phát hiện thô, tiến hành cập nhật ByteTrack
+            bboxes_xyxy = []
             if len(raw_dets) > 0:
-                bboxes_xyxy = []
                 scores = []
                 classes = []
                 for box, class_id, conf in raw_dets:
@@ -120,10 +120,19 @@ class TrackingThread(threading.Thread):
             has_roi = bool(zones)
             detections = []
             for row in tracked_outputs:
-                # row cấu trúc: [x1, y1, x2, y2, track_id, score, class_id, idx]
-                x1, y1, x2, y2, track_id, score, class_id, idx = row
+                # row cấu trúc: [x1_kf, y1_kf, x2_kf, y2_kf, track_id, score, class_id, idx]
+                x1_kf, y1_kf, x2_kf, y2_kf, track_id, score, class_id, idx = row
                 class_id = int(class_id)
                 track_id = int(track_id)
+
+                # Mặc định sử dụng tọa độ dự đoán của bộ lọc Kalman (ByteTrack)
+                x1, y1, x2, y2 = x1_kf, y1_kf, x2_kf, y2_kf
+
+                # Nếu tracking khớp với phát hiện thô hiện tại từ YOLO, sử dụng trực tiếp tọa độ của YOLO
+                # để loại bỏ hoàn toàn độ trễ do bộ lọc Kalman làm mượt (giúp bbox bám sát vật thể tức thì)
+                original_idx = int(idx)
+                if len(bboxes_xyxy) > 0 and 0 <= original_idx < len(bboxes_xyxy):
+                    x1, y1, x2, y2 = bboxes_xyxy[original_idx]
 
                 cx = int((x1 + x2) / 2)
                 cy = int((y1 + y2) / 2)

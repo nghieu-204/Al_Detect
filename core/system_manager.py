@@ -6,7 +6,7 @@ import torch
 from ultralytics import YOLO
 
 from threads.camera_capture import CameraCaptureThread
-from threads.batch_inference import BatchInferenceThread
+from threads.inference_thread import InferenceThread
 from threads.tracking_thread import TrackingThread
 from utils.helpers import (
     MQTT_CONFIG,
@@ -39,8 +39,10 @@ class SystemManager:
         print(f"AI Device detected: {self.device.upper()}")
         
         self.yolo_model_path = self.config["ai"]["model_path"]
+        self.yolo_model = None
+        self.model_lock = threading.Lock()
         
-        self.batch_inference_thread = None
+        self.inference_threads = {}
         
         # Khởi tạo MQTT client
         self.mqtt_client = new_client(MQTT_CONFIG, f"roi_ai_service_{int(time.time())}")
@@ -148,6 +150,12 @@ class SystemManager:
                     self.capture_threads[code].join(timeout=1.0)
                     del self.capture_threads[code]
                     
+                    if code in self.inference_threads:
+                        print(f"Stopping inference thread for camera: {code}")
+                        self.inference_threads[code].stop()
+                        self.inference_threads[code].join(timeout=1.0)
+                        del self.inference_threads[code]
+
                     if code in self.tracking_threads:
                         print(f"Stopping tracking thread for camera: {code}")
                         self.tracking_threads[code].stop()
@@ -162,7 +170,7 @@ class SystemManager:
                     topic = MQTT_CONFIG["polygons_topic"].format(camera_code=code)
                     self.mqtt_client.unsubscribe(topic)
                         
-            # Bật luồng capture, tracking cho camera mới
+            # Bật luồng capture, tracking, inference cho camera mới
             for code in new_online_codes:
                 if code not in self.capture_threads:
                     cam_info = parsed_cameras[code]
@@ -183,6 +191,21 @@ class SystemManager:
                     t_queue = queue.Queue(maxsize=1)
                     self.tracking_queues[code] = t_queue
                     
+                    # Khởi tạo và chạy luồng InferenceThread cho camera này
+                    inf_thread = InferenceThread(
+                        camera_code=code,
+                        cap_thread=cap_thread,
+                        tracking_queue=t_queue,
+                        camera_zones=self.camera_zones,
+                        yolo_model=self.yolo_model,
+                        model_lock=self.model_lock,
+                        confidence=self.config["ai"]["confidence"],
+                        device=self.device,
+                        data_lock=self.data_lock
+                    )
+                    inf_thread.start()
+                    self.inference_threads[code] = inf_thread
+
                     track_thread = TrackingThread(
                         camera_code=code,
                         tracking_queue=t_queue,
@@ -197,23 +220,16 @@ class SystemManager:
             self.active_cameras = parsed_cameras
 
     def start(self):
-        # Kết nối MQTT broker
+        # 1. Tải mô hình YOLO trước để các luồng inference sẵn sàng sử dụng
+        from ultralytics import YOLO
+        print(f"[SystemManager] Loading YOLO model: {self.yolo_model_path} on device: {self.device}")
+        self.yolo_model = YOLO(self.yolo_model_path, task='detect')
+        self.class_names_ref.update(self.yolo_model.names)
+
+        # 2. Kết nối MQTT broker
         print(f"Connecting to broker: {MQTT_CONFIG['broker']}:{MQTT_CONFIG['port']}")
         self.mqtt_client.connect(MQTT_CONFIG["broker"], MQTT_CONFIG["port"], 60)
         self.mqtt_client.loop_start()
-
-        # Bật luồng Batch Inference
-        self.batch_inference_thread = BatchInferenceThread(
-            capture_threads=self.capture_threads,
-            camera_zones=self.camera_zones,
-            tracking_queues=self.tracking_queues,
-            yolo_model_path=self.yolo_model_path,
-            class_names_ref=self.class_names_ref,
-            device=self.device,
-            confidence=self.config["ai"]["confidence"],
-            data_lock=self.data_lock
-        )
-        self.batch_inference_thread.start()
 
         # Bật luồng ghi log FPS
         self.metrics_running = True
@@ -234,12 +250,14 @@ class SystemManager:
         self.mqtt_client.loop_stop()
         self.mqtt_client.disconnect()
         
-        if self.batch_inference_thread is not None:
-            print("Stopping batch inference thread...")
-            self.batch_inference_thread.stop()
-            self.batch_inference_thread.join(timeout=1.0)
-            
         with self.data_lock:
+            for code, thread in list(self.inference_threads.items()):
+                print(f"Stopping inference thread: {code}")
+                thread.stop()
+            for thread in self.inference_threads.values():
+                thread.join(timeout=1.0)
+            self.inference_threads.clear()
+
             for code, thread in list(self.tracking_threads.items()):
                 print(f"Stopping tracking thread: {code}")
                 thread.stop()
