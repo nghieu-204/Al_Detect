@@ -7,7 +7,7 @@
     "company_id": 10
   },
   "ai": {
-    "model_path": "models/yolov8s.engine",
+    "model_path": "models/yolov8s.pt",
     "confidence": 0.2,
     "ai_module": "FACE"
   },
