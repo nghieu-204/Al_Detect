@@ -74,12 +74,9 @@ class CameraCaptureThread(threading.Thread):
         width, height = 640, 360
         frame_size = width * height * 3
 
-        # Kiểm tra hỗ trợ CUDA một lần duy nhất tại mỗi lần chạy luồng
-        use_cuda = check_cuda_supported(ffmpeg_path)
-        if use_cuda:
-            print(f"[{self.camera_code}] Phát hiện FFMPEG hỗ trợ CUDA. Sẽ giải mã bằng GPU.")
-        else:
-            print(f"[{self.camera_code}] FFMPEG không hỗ trợ CUDA hoặc driver không tương thích. Sẽ giải mã bằng CPU.")
+        # Ép buộc sử dụng CPU giải mã để tiết kiệm VRAM và tài nguyên GPU cho 2 model YOLO chạy ổn định
+        use_cuda = False
+        print(f"[{self.camera_code}] Sẽ giải mã video bằng CPU (tối ưu hóa VRAM GPU cho 2 model YOLO).")
 
         while self.running:
             print(f"[{self.camera_code}] Đang khởi tạo tiến trình FFMPEG...")

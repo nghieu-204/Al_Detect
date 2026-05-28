@@ -8,6 +8,7 @@ from ultralytics import YOLO
 from threads.camera_capture import CameraCaptureThread
 from threads.inference_thread import InferenceThread
 from threads.tracking_thread import TrackingThread
+from threads.lpd_thread import LPDThread
 from utils.helpers import (
     MQTT_CONFIG,
     new_client,
@@ -40,7 +41,16 @@ class SystemManager:
         
         self.yolo_model_path = self.config["ai"]["model_path"]
         self.yolo_model = None
-        self.model_lock = threading.Lock()
+        self.model1_lock = threading.Lock()
+        self.model2_lock = threading.Lock()
+        
+        # Cấu hình cho nhận diện biển số xe (Model 2)
+        self.lpd_queue = queue.Queue(maxsize=50)
+        self.track_plates_registry = {}
+        self.registry_lock = threading.Lock()
+        self.plate_model_path = self.config["ai"].get("plate_model_path", "models/best.pt")
+        self.plate_confidence = self.config["ai"].get("plate_confidence", 0.5)
+        self.lpd_thread = None
         
         self.inference_threads = {}
         
@@ -198,7 +208,7 @@ class SystemManager:
                         tracking_queue=t_queue,
                         camera_zones=self.camera_zones,
                         yolo_model=self.yolo_model,
-                        model_lock=self.model_lock,
+                        model_lock=self.model1_lock,
                         confidence=self.config["ai"]["confidence"],
                         device=self.device,
                         data_lock=self.data_lock
@@ -212,7 +222,10 @@ class SystemManager:
                         mqtt_client=self.mqtt_client,
                         bbox_topic_template=MQTT_CONFIG["bbox_topic_template"],
                         ai_module=MQTT_CONFIG["ai_module"],
-                        class_names=self.class_names_ref
+                        class_names=self.class_names_ref,
+                        lpd_queue=self.lpd_queue,
+                        track_plates_registry=self.track_plates_registry,
+                        registry_lock=self.registry_lock
                     )
                     track_thread.start()
                     self.tracking_threads[code] = track_thread
@@ -226,9 +239,35 @@ class SystemManager:
         self.yolo_model = YOLO(self.yolo_model_path, task='detect')
         self.class_names_ref.update(self.yolo_model.names)
 
-        # 2. Kết nối MQTT broker
+        # 1.2. Tải mô hình nhận diện biển số xe (LPD Model) đồng bộ trên luồng chính
+        print(f"[SystemManager] Loading LPD model: {self.plate_model_path} on device: {self.device}")
+        lpd_model = YOLO(self.plate_model_path, task='detect')
+
+        # 1.5. Khởi chạy luồng nhận diện biển số xe (LPDThread)
+        print(f"[SystemManager] Starting LPDThread")
+        self.lpd_thread = LPDThread(
+            lpd_queue=self.lpd_queue,
+            lpd_model=lpd_model,
+            confidence=self.plate_confidence,
+            device=self.device,
+            model_lock=self.model2_lock,
+            registry=self.track_plates_registry,
+            registry_lock=self.registry_lock
+        )
+        self.lpd_thread.start()
+
+        # 2. Kết nối MQTT broker với cơ chế retry nếu gặp lỗi lúc khởi động
         print(f"Connecting to broker: {MQTT_CONFIG['broker']}:{MQTT_CONFIG['port']}")
-        self.mqtt_client.connect(MQTT_CONFIG["broker"], MQTT_CONFIG["port"], 60)
+        connected = False
+        retry_interval = 2.0
+        while not connected:
+            try:
+                self.mqtt_client.connect(MQTT_CONFIG["broker"], MQTT_CONFIG["port"], 60)
+                connected = True
+            except Exception as e:
+                print(f"[SystemManager] Lỗi kết nối MQTT broker: {e}. Thử lại sau {retry_interval:.1f}s...")
+                time.sleep(retry_interval)
+                retry_interval = min(retry_interval * 2, 30.0)
         self.mqtt_client.loop_start()
 
         # Bật luồng ghi log FPS
@@ -265,6 +304,11 @@ class SystemManager:
                 thread.join(timeout=1.0)
             self.tracking_threads.clear()
             self.tracking_queues.clear()
+
+            if getattr(self, 'lpd_thread', None) is not None:
+                print("Stopping LPD thread...")
+                self.lpd_thread.stop()
+                self.lpd_thread.join(timeout=1.0)
 
             for code, thread in list(self.capture_threads.items()):
                 print(f"Stopping capture thread: {code}")

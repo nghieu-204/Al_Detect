@@ -18,7 +18,10 @@ class TrackingThread(threading.Thread):
         mqtt_client,
         bbox_topic_template: str,
         ai_module: str,
-        class_names: dict
+        class_names: dict,
+        lpd_queue=None,
+        track_plates_registry=None,
+        registry_lock=None
     ):
         super().__init__(name=f"TrackingThread_{camera_code}", daemon=True)
         self.camera_code = camera_code
@@ -27,6 +30,10 @@ class TrackingThread(threading.Thread):
         self.bbox_topic_template = bbox_topic_template
         self.ai_module = ai_module
         self.class_names = class_names
+        self.lpd_queue = lpd_queue
+        self.track_plates_registry = track_plates_registry
+        self.registry_lock = registry_lock
+        self.track_lpd_states = {}  # track_id -> {"attempts": int, "last_attempt_time": float}
         self.running = True
 
     def run(self):
@@ -149,6 +156,73 @@ class TrackingThread(threading.Thread):
                 if not inside_any:
                     continue
 
+                # 1. Kiểm tra kết quả biển số trong registry dùng chung
+                plate_info = None
+                has_plate = False
+                if self.track_plates_registry is not None:
+                    registry_key = f"{self.camera_code}_{track_id}"
+                    with self.registry_lock:
+                        raw_plate = self.track_plates_registry.get(registry_key)
+                    if raw_plate is not None:
+                        if raw_plate.get("confidence", 0.0) > 0.7:
+                            has_plate = True
+                        
+                        # Tái cấu trúc tọa độ biển số theo vị trí xe ở frame hiện tại (chống trễ hình)
+                        rel_bbox = raw_plate["relative_bbox"]
+                        rx1, ry1, rx2, ry2 = rel_bbox
+                        
+                        w_veh = float(x2 - x1)
+                        h_veh = float(y2 - y1)
+                        
+                        g_px1 = max(0.0, min(float(x1) + rx1 * w_veh, float(w)))
+                        g_py1 = max(0.0, min(float(y1) + ry1 * h_veh, float(h)))
+                        g_px2 = max(0.0, min(float(x1) + rx2 * w_veh, float(w)))
+                        g_py2 = max(0.0, min(float(y1) + ry2 * h_veh, float(h)))
+                        
+                        print(f"[TrackingThread_{self.camera_code}] Track {track_id} Veh: {x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}, Plate: {g_px1:.1f},{g_py1:.1f},{g_px2:.1f},{g_py2:.1f}")
+                        
+                        plate_info = {
+                            "bbox": [g_px1 / w, g_py1 / h, g_px2 / w, g_py2 / h],
+                            "confidence": raw_plate["confidence"]
+                        }
+
+                # 2. Gửi yêu cầu nhận diện biển số xe (nếu chưa tìm thấy biển số tin cậy)
+                if self.lpd_queue is not None and not has_plate:
+                    state = self.track_lpd_states.setdefault(track_id, {"attempts": 0, "last_attempt_time": 0.0, "last_seen": 0.0})
+                    state["last_seen"] = time.time()
+                    
+                    attempts = state["attempts"]
+                    last_attempt_time = state["last_attempt_time"]
+                    
+                    width_px = x2 - x1
+                    height_px = y2 - y1
+                    size_ok = (width_px > 30) and (height_px > 30)
+                    time_ok = (time.time() - last_attempt_time) > 0.5
+                    
+                    if attempts < 3 and size_ok and time_ok and not self.lpd_queue.full():
+                        cx1 = max(0, int(x1))
+                        cy1 = max(0, int(y1))
+                        cx2 = min(w, int(x2))
+                        cy2 = min(h, int(y2))
+                        
+                        if (cx2 - cx1) > 10 and (cy2 - cy1) > 10:
+                            crop_img = frame[cy1:cy2, cx1:cx2].copy()
+                            request_data = {
+                                "camera_code": self.camera_code,
+                                "track_id": track_id,
+                                "crop_img": crop_img,
+                                "vehicle_bbox": [x1, y1, x2, y2],
+                                "frame_size": (w, h),
+                                "timestamp": time.time()
+                            }
+                            try:
+                                self.lpd_queue.put_nowait(request_data)
+                                state["attempts"] = attempts + 1
+                                state["last_attempt_time"] = time.time()
+                                print(f"[TrackingThread_{self.camera_code}] Pushed vehicle crop for track_{track_id} to LPD queue (size: {width_px}x{height_px}, attempt: {attempts + 1})")
+                            except queue.Full:
+                                pass
+
                 # Chuẩn hóa tọa độ bbox [0.0 - 1.0]
                 bbox = [
                     float(x1) / w,
@@ -159,7 +233,7 @@ class TrackingThread(threading.Thread):
                 cls_name = self.class_names.get(class_id, "unknown")
                 obj_id = f"obj_{track_id}"
 
-                detections.append({
+                detection_item = {
                     "id": obj_id,
                     "cls": cls_name,
                     "class": cls_name,
@@ -168,7 +242,37 @@ class TrackingThread(threading.Thread):
                     "confidence": float(score),
                     "bbox": bbox,
                     "color": "#00ff00"
-                })
+                }
+
+                # Đính kèm thông tin biển số xe nếu tìm thấy trong registry (để lưu trữ/xử lý backend)
+                if plate_info is not None:
+                    detection_item["license_plate"] = {
+                        "bbox": plate_info["bbox"],
+                        "confidence": plate_info["confidence"]
+                    }
+                    print(f"[TrackingThread_{self.camera_code}] Attaching plate for track_{track_id} to MQTT (conf: {plate_info['confidence']:.2f})")
+
+                detections.append(detection_item)
+
+                # Đồng thời thêm biển số xe như một đối tượng detect độc lập để Web vẽ BBox trực tiếp
+                if plate_info is not None:
+                    plate_detection = {
+                        "id": f"plate_{track_id}",
+                        "cls": "license_plate",
+                        "class": "license_plate",
+                        "label": "license_plate",
+                        "class_id": 99,  # ID giả lập cho lớp biển số
+                        "confidence": plate_info["confidence"],
+                        "bbox": plate_info["bbox"],
+                        "color": "#ff0000"  # Vẽ BBox biển số màu đỏ cho nổi bật
+                    }
+                    detections.append(plate_detection)
+
+            # Dọn dẹp trạng thái LPD của các track đã lâu không xuất hiện (sau 60 giây)
+            now = time.time()
+            expired_tids = [tid for tid, st in self.track_lpd_states.items() if now - st.get("last_seen", 0.0) > 60.0]
+            for tid in expired_tids:
+                del self.track_lpd_states[tid]
 
             # Publish kết quả bám vết của camera này lên MQTT
             self.publish_detections(detections, zones)

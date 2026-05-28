@@ -21,7 +21,9 @@ def load_config():
         "ai": {
             "model_path": "models/yolov8n.pt",
             "confidence": 0.4,
-            "ai_module": "FACE"
+            "ai_module": "FACE",
+            "plate_model_path": "models/best.pt",
+            "plate_confidence": 0.5
         },
         "active_cameras": ["1", "2", "Demo01"]
     }
